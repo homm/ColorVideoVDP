@@ -11,3 +11,4 @@ features*/
 logs/
 new_config/
 uv.lock
+/results.json

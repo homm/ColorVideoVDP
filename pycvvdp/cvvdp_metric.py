@@ -2,7 +2,7 @@ import math
 import torch
 from torch.utils import checkpoint
 from torch import Tensor
-from torchvision.transforms import GaussianBlur
+import torch.nn.functional as Func
 import numpy as np
 import os
 import json
@@ -82,6 +82,23 @@ def pow_neg( x:Tensor, p ):
     return (torch.max(x,min_v) ** p) + (torch.max(-x,min_v) ** p) - min_v**p
 
 
+def separable_gaussian_blur(image, sigma):
+    kernel_size = int(sigma * 4) + 1
+    x = torch.linspace(
+        -(kernel_size - 1) / 2, (kernel_size - 1) / 2,
+        kernel_size, dtype=image.dtype, device=image.device
+    )
+    kernel = torch.exp(-0.5 * (x / sigma).pow(2))
+    kernel = kernel / kernel.sum()
+    shape = image.shape
+    image = image.reshape(-1, 1, *shape[-2:])
+    image = Func.pad(image, (kernel_size // 2, kernel_size // 2, 0, 0), mode="reflect")
+    image = Func.conv2d(image, kernel.view(1, 1, 1, -1))
+    image = Func.pad(image, (0, 0, kernel_size // 2, kernel_size // 2), mode="reflect")
+    image = Func.conv2d(image, kernel.view(1, 1, -1, 1))
+    return image.reshape(shape)
+
+
 class cvvdp_frame_buffers:
     def __init__(self) -> None:
         self.sw_buf = [None, None] # Sliding window buffer [test: Tensor, reference: Tensor] - stores frames for applying a temporal filter
@@ -143,7 +160,6 @@ class cvvdp(vq_metric):
         self.mask_c = torch.as_tensor( parameters['mask_c'], device=self.device ) # content masking adjustment
         self.pu_dilate = parameters['pu_dilate']
         if self.pu_dilate>0:
-            self.pu_blur = GaussianBlur(int(self.pu_dilate*4)+1, self.pu_dilate)
             self.pu_padsize = int(self.pu_dilate*2)
 
         self.beta = torch.as_tensor( parameters['beta'], device=self.device ) # The exponent of the spatial summation (p-norm)
@@ -154,9 +170,8 @@ class cvvdp(vq_metric):
         self.sensitivity_correction = torch.as_tensor( parameters['sensitivity_correction'], device=self.device ) # Correct CSF values in dB. Negative values make the metric less sensitive.
         self.masking_model = parameters['masking_model']
         if "texture" in self.masking_model:
-            tex_blur_sigma = 8
-            self.tex_blur = GaussianBlur(int(tex_blur_sigma*4)+1, tex_blur_sigma)
-            self.tex_pad_size = int(tex_blur_sigma*2)
+            self.tex_blur_sigma = 8
+            self.tex_pad_size = int(self.tex_blur_sigma*2)
 
         self.csf = parameters['csf']
         self.local_adapt = parameters['local_adapt'] # Local adaptation: 'simple' or or 'gpyr'
@@ -870,15 +885,15 @@ class cvvdp(vq_metric):
                     T_t = self.cm_transd(T_p)
                     R_t = self.cm_transd(R_p)
 
-                    mu_T = self.tex_blur.forward(T_t)
-                    mu_R = self.tex_blur.forward(R_t)
+                    mu_T = separable_gaussian_blur(T_t, self.tex_blur_sigma)
+                    mu_R = separable_gaussian_blur(R_t, self.tex_blur_sigma)
 
                     mu_T_sq = mu_T * mu_T
                     mu_R_sq = mu_R * mu_R
                     #mu_TR = mu_T * mu_R
 
-                    sigma_T_sq = (self.tex_blur.forward(T_t * T_t) - mu_T_sq).clamp(min=0.)
-                    sigma_R_sq = (self.tex_blur.forward(R_t * R_t) - mu_R_sq).clamp(min=0.)
+                    sigma_T_sq = (separable_gaussian_blur(T_t * T_t, self.tex_blur_sigma) - mu_T_sq).clamp(min=0.)
+                    sigma_R_sq = (separable_gaussian_blur(R_t * R_t, self.tex_blur_sigma) - mu_R_sq).clamp(min=0.)
                     #sigma_TR = compensation * (gaussian_filter(X * Y, win) - mu1_mu2)
 
                     #cs_map = (2 * sigma12 + C2) / (sigma1_sq + sigma2_sq + C2)  # set alpha=beta=gamma=1
@@ -923,9 +938,7 @@ class cvvdp(vq_metric):
     def phase_uncertainty(self, M):
         # Blur only when the image is larger then the required pad size
         if self.pu_dilate != 0 and M.shape[-2]>self.pu_padsize and M.shape[-1]>self.pu_padsize:
-            #M_pu = utils.imgaussfilt( M, self.pu_dilate ) * torch.pow(10.0, self.mask_c)
-            H, W = M.shape[-2], M.shape[-1] # We need to reshape because the Gaussian does not work with 5D tensors
-            M_pu = self.pu_blur.forward(M.view(-1,1,H,W)).view( M.shape[0:-2] + (H,W) ) * (10**self.mask_c)
+            M_pu = separable_gaussian_blur(M, self.pu_dilate) * (10**self.mask_c)
         else:
             M_pu = M * (10**self.mask_c)
         return M_pu
@@ -933,8 +946,7 @@ class cvvdp(vq_metric):
     def phase_uncertainty_no_c(self, M):
         # Blur only when the image is larger then the required pad size
         if self.pu_dilate != 0 and M.shape[-2]>self.pu_padsize and M.shape[-1]>self.pu_padsize:
-            #M_pu = utils.imgaussfilt( M, self.pu_dilate ) * torch.pow(10.0, self.mask_c)
-            M_pu = self.pu_blur.forward(M)
+            M_pu = separable_gaussian_blur(M, self.pu_dilate)
         else:
             M_pu = M
         return M_pu

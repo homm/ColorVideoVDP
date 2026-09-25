@@ -142,7 +142,9 @@ class video_reader:
         self.frame_bytes = int(self.width * self.height * self.bpp)
 
         log_level = 'info' if verbose else 'quiet'
-        stream = ffmpeg.output(stream, 'pipe:', format='rawvideo', pix_fmt=out_pix_fmt).global_args( '-loglevel', log_level )
+        stream = ffmpeg.output(
+            stream, 'pipe:', format='rawvideo', pix_fmt=out_pix_fmt
+        ).global_args('-nostdin', '-loglevel', log_level)
         #.global_args('-hwaccel', 'cuda', '-hwaccel_output_format', 'cuda') - no effect on decoding speed
         self.process = ffmpeg.run_async(stream, pipe_stdout=True)
 
@@ -253,7 +255,9 @@ class video_reader_yuv_pytorch(video_reader):
 
         stream = ffmpeg.input(vidfile)
         log_level = 'info' if verbose else 'quiet'
-        stream = ffmpeg.output(stream, 'pipe:', format='rawvideo', pix_fmt=out_pix_fmt).global_args( '-loglevel', log_level )
+        stream = ffmpeg.output(
+            stream, 'pipe:', format='rawvideo', pix_fmt=out_pix_fmt
+        ).global_args('-nostdin', '-loglevel', log_level)
         self.process = ffmpeg.run_async(stream, pipe_stdout=True)
 
     def unpack(self, x, device):

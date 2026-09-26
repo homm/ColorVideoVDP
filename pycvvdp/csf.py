@@ -1,4 +1,5 @@
 import torch
+import torch.nn.functional as F
 import pycvvdp.utils as utils
 
 from pycvvdp.interp import interp1q, batch_interp1d
@@ -10,19 +11,23 @@ class castleCSF:
         csf_lut_file = utils.config_files.find( f"csf_lut_{csf_version}.json", config_paths )
         csf_lut = utils.json2dict(csf_lut_file)
 
-        self.log_L_bkg = torch.log10( torch.as_tensor(csf_lut["L_bkg"], device=device) )
-        self.log_rho = torch.log10( torch.as_tensor(csf_lut["rho"], device=device) )
+        log_L_bkg = torch.log10( torch.as_tensor(csf_lut["L_bkg"], device=device) )
+        log_rho = torch.log10( torch.as_tensor(csf_lut["rho"], device=device) )
+        self.log_L_bkg = torch.linspace(log_L_bkg[0], log_L_bkg[-1], (log_L_bkg.numel()-1)*4+1, device=device)
+        self.log_rho = torch.linspace(log_rho[0], log_rho[-1], (log_rho.numel()-1)*4+1, device=device)
         self.omega = csf_lut["omega"]
 
-        self.logS = []
+        self.S = []
         for oo in range(2): # For each temp frequency
-            self.logS.append([])
+            self.S.append([])
             ch_num = 3 if oo==0 else 1
             for cc in range(ch_num):
                 field_name = f"o{self.omega[oo]}_c{cc+1}"
-                self.logS[oo].append( torch.as_tensor(csf_lut[field_name], device=device) )
+                logS = torch.as_tensor(csf_lut[field_name], device=device)[None, None]
+                logS = F.interpolate(logS, size=(self.log_L_bkg.numel(), self.log_rho.numel()), mode="bilinear", align_corners=True)
+                self.S[oo].append( 10**logS[0, 0] )
 
-        self.logS_rho = {}
+        self.S_rho = {}
 
 
     def sensitivity(self, rho, omega, logL_bkg, cc, sigma):
@@ -33,20 +38,19 @@ class castleCSF:
 
         # Which LUT to use
         oo = 0 if omega==0 else 1
-        logS = self.logS[oo][cc]
+        S_lut = self.S[oo][cc]
 
         # First interpolate between spatial frequencies rho
         rho_str = f"o{oo}_c{cc}_rho{rho}"
-        if rho_str in self.logS_rho: # Check if it is cached
-            logS_r = self.logS_rho[rho_str]
+        if rho_str in self.S_rho: # Check if it is cached
+            S_r = self.S_rho[rho_str]
         else:
             N = self.log_L_bkg.numel()
-            logS_r = torch.empty((N), device=self.device)
-            logS_r = batch_interp1d(torch.log10(torch.as_tensor(rho, device=self.device, dtype=torch.float32)).expand(N), self.log_rho, logS)
-            self.logS_rho[rho_str] = logS_r
+            S_r = batch_interp1d(torch.log10(torch.as_tensor(rho, device=self.device, dtype=torch.float32)).expand(N), self.log_rho, S_lut)
+            self.S_rho[rho_str] = S_r
 
         # Then, interpolate across luminance levels
-        S = 10**interp1q( self.log_L_bkg, logS_r, logL_bkg )
+        S = interp1q( self.log_L_bkg, S_r, logL_bkg )
 
         return S
 
@@ -58,4 +62,4 @@ class castleCSF:
         for oo in range(2): # For each temp frequency
             ch_num = 3 if oo==0 else 1
             for cc in range(ch_num):
-                self.logS[oo][cc] = self.logS[oo][cc].to(device)
+                self.S[oo][cc] = self.S[oo][cc].to(device)

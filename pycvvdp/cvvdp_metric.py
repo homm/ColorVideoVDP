@@ -1,4 +1,5 @@
 import math
+from functools import lru_cache
 import torch
 from torch.utils import checkpoint
 from torch import Tensor
@@ -35,7 +36,7 @@ from pycvvdp.vq_exception import vq_exception
 # from gfxdisp.pfs.pfs_torch import pfs_torch
 
 from pycvvdp.lpyr_dec import lpyr_dec_2, weber_contrast_pyr, log_contrast_pyr
-from pycvvdp.interp import interp1dim2
+from pycvvdp.interp import interp1q, interp1dim2
 
 import pycvvdp.utils as utils
 
@@ -59,11 +60,37 @@ from pycvvdp.csf import castleCSF
 #     for obj in objs_sorted:
 #         print( obj[1] )
 
+@lru_cache(maxsize=16)
+def _safe_pow_table(p, device, dtype):
+    grid = torch.linspace(0, 512, 32768, device=device, dtype=dtype)
+    epsilon = torch.as_tensor(0.00001, device=device)
+    return grid, (grid + epsilon) ** p - epsilon**p
+
+
 # A differentiable variant of a power function
 def safe_pow( x:Tensor, p ):
     #assert (not x.isnan().any()) and (not x.isinf().any()), "Must not be nan"
     #assert torch.all(x>=0), "Must be positive"
 
+    if torch.as_tensor(p).eq(2).all().item():
+        return x * x
+    if x.numel() >= 100 and not (isinstance(p, Tensor) and p.requires_grad):
+        min_value, max_value = torch.aminmax(x)
+        if min_value >= 0 and max_value <= 512:
+            p_tensor = torch.as_tensor(p)
+            if p_tensor.numel() == 1:
+                grid, values = _safe_pow_table(p_tensor.item(), x.device, x.dtype)
+                return interp1q(grid, values, x)
+
+            p_shape = (1,) * (x.ndim - p_tensor.ndim) + tuple(p_tensor.shape)
+            axes = [axis for axis, size in enumerate(p_shape) if size > 1]
+            if p_tensor.ndim <= x.ndim and len(axes) == 1 and x.shape[axes[0]] == p_tensor.numel():
+                axis = axes[0]
+                parts = []
+                for part, exponent in zip(x.unbind(dim=axis), p_tensor.flatten().tolist()):
+                    grid, values = _safe_pow_table(exponent, x.device, x.dtype)
+                    parts.append(interp1q(grid, values, part))
+                return torch.stack(parts, dim=axis)
     if True: #isinstance( p, Tensor ) and p.requires_grad:
         # If we need a derivative with respect to p, x must not be 0
         epsilon = torch.as_tensor( 0.00001, device=x.device )

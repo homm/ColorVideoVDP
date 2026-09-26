@@ -178,13 +178,20 @@ class lpyr_dec():
         # self.K_ch_dim = ch_dim
         return self.K_vert, self.K_horiz
 
+    def _conv2d(self, x, kernel, stride=1, padding=0):
+        # NNPACK is slower for these single-channel filters once the batch reaches 16.
+        if x.device.type == 'cpu' and x.dtype == torch.float32 and x.shape[0] >= 16:
+            return torch.cat([Func.conv2d(part, kernel, stride=stride, padding=padding)
+                              for part in x.split(8)], dim=0)
+        return Func.conv2d(x, kernel, stride=stride, padding=padding)
+
 
     def gausspyr_reduce(self, x, kernel_a = 0.4):
 
         K_vert, K_horiz = self.get_kernels( x, kernel_a )
 
         H, W = x.shape[-2], x.shape[-1]
-        y_a = Func.conv2d(x.view(-1,1,H,W), K_vert, stride=(2,1), padding=(2,0)).view( x.shape[0:-2] + (-1,W) )
+        y_a = self._conv2d(x.view(-1,1,H,W), K_vert, stride=(2,1), padding=(2,0)).view( x.shape[0:-2] + (-1,W) )
         # view(B,C,-1,W)
 
         # Symmetric padding
@@ -195,7 +202,7 @@ class lpyr_dec():
             y_a[...,-1,:] += x[...,-1,:]*K_vert[...,4,0]
 
         H = y_a.shape[-2]
-        y = Func.conv2d(y_a.view(-1,1,H,W), K_horiz, stride=(1,2), padding=(0,2)).view( x.shape[0:-2] + (H,-1) )
+        y = self._conv2d(y_a.view(-1,1,H,W), K_horiz, stride=(1,2), padding=(0,2)).view( x.shape[0:-2] + (H,-1) )
 
         # Symmetric padding
         y[...,:,0] += y_a[...,:,0]*K_horiz[...,0,1] + y_a[...,:,1]*K_horiz[...,0,0]
@@ -225,12 +232,12 @@ class lpyr_dec():
         y_a = self.interleave_zeros_and_pad(x, dim=-2, exp_size=sz)
 
         H, W = y_a.shape[-2], y_a.shape[-1]
-        y_a = Func.conv2d(y_a.view(-1,1,H,W), K_vert*2).view( x.shape[0:-2] + (-1,W) )
+        y_a = self._conv2d(y_a.view(-1,1,H,W), K_vert*2).view( x.shape[0:-2] + (-1,W) )
 
         y   = self.interleave_zeros_and_pad(y_a, dim=-1, exp_size=sz)
         H, W = y.shape[-2], y.shape[-1]
 
-        y   = Func.conv2d(y.view(-1,1,H,W), K_horiz*2).view( x.shape[0:-2] + (H,-1) )
+        y   = self._conv2d(y.view(-1,1,H,W), K_horiz*2).view( x.shape[0:-2] + (H,-1) )
 
         return y
 

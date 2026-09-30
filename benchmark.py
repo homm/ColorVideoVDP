@@ -8,6 +8,7 @@ import json
 import math
 import platform
 import resource
+import shutil
 import statistics
 import sys
 import time
@@ -22,6 +23,10 @@ from PIL import Image
 import torch
 
 import pycvvdp
+
+if shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None:
+    import ffmpeg_binaries
+    ffmpeg_binaries.add_to_path()
 
 
 class Case(ABC):
